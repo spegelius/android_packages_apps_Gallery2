@@ -707,6 +707,10 @@ public class VideoModule implements CameraModule,
             } else {  // Driver supports separates outputs for preview and video.
                 List<Size> sizes = mParameters.getSupportedPreviewSizes();
                 Size preferred = mParameters.getPreferredPreviewSizeForVideo();
+                if (mActivity.getResources().getBoolean(R.bool.ignorePreferredPreviewSizeForVideo)
+                        || preferred == null) {
+                    preferred = sizes.get(0);
+                }
                 int product = preferred.width * preferred.height;
                 Iterator<Size> it = sizes.iterator();
                 // Remove the preview sizes that are not preferred.
@@ -1802,6 +1806,11 @@ public class VideoModule implements CameraModule,
     private void setCameraParameters() {
         mParameters.setPreviewSize(mDesiredPreviewWidth, mDesiredPreviewHeight);
         mParameters.setPreviewFrameRate(mProfile.videoFrameRate);
+
+        // Set video size before recording starts
+        CameraSettings.setEarlyVideoSize(mParameters, mProfile);
+        // Set video mode
+        CameraSettings.setVideoMode(mParameters, true);
 
         // Set flash mode.
         String flashMode;

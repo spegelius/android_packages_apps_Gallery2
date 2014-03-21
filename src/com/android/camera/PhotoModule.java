@@ -27,6 +27,8 @@ import android.content.Intent;
 import android.content.SharedPreferences.Editor;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
 import android.graphics.SurfaceTexture;
 import android.hardware.Camera.CameraInfo;
 import android.hardware.Camera.Parameters;
@@ -68,6 +70,7 @@ import com.android.gallery3d.filtershow.FilterShowActivity;
 import com.android.gallery3d.filtershow.crop.CropExtras;
 import com.android.gallery3d.util.UsageStatistics;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
@@ -820,7 +823,11 @@ public class PhotoModule
                         CaptureAnimManager.getAnimationDuration());
             }
             mFocusManager.updateFocusUI(); // Ensure focus indicator is hidden.
-            if (!mIsImageCaptureIntent) {
+
+            boolean isSamsungHDR =
+                    (mSceneMode == Util.SCENE_MODE_HDR && Util.needSamsungHDRFormat());
+
+            if (!mIsImageCaptureIntent || isSamsungHDR) {
                 if (ApiHelper.CAN_START_PREVIEW_IN_JPEG_CALLBACK) {
                     setupPreview();
                 } else {
@@ -834,17 +841,17 @@ public class PhotoModule
             if (!mIsImageCaptureIntent) {
                 // Calculate the width and the height of the jpeg.
                 Size s = mParameters.getPictureSize();
-                ExifInterface exif = Exif.getExif(jpegData);
-                int orientation = Exif.getOrientation(exif);
-                int width, height;
-                if ((mJpegRotation + orientation) % 180 == 0) {
+                final ExifInterface exif = Exif.getExif(jpegData);
+                final int orientation = Exif.getOrientation(exif);
+                final int width, height;
+                if ((mJpegRotation + orientation) % 180 == 0 || isSamsungHDR) {
                     width = s.width;
                     height = s.height;
                 } else {
                     width = s.height;
                     height = s.width;
                 }
-                String title = mNamedImages.getTitle();
+                final String title = mNamedImages.getTitle();
                 long date = mNamedImages.getDate();
                 if (title == null) {
                     Log.e(TAG, "Unbalanced name/data pair");
@@ -861,9 +868,37 @@ public class PhotoModule
                         exif.setTag(directionRefTag);
                         exif.setTag(directionTag);
                     }
-                    mActivity.getMediaSaveService().addImage(
+
+                    if (isSamsungHDR) {
+                        final long finalDate = date;
+                        new Thread(new Runnable() {
+                            public void run() {
+                                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                                Bitmap bm = Util.decodeYUV422P(jpegData, width, height);
+                                if (mJpegRotation != 0) {
+                                    Matrix matrix = new Matrix();
+                                    matrix.postRotate(mJpegRotation);
+                                    bm = Bitmap.createBitmap(bm, 0, 0, width, height, matrix, true);
+                                }
+
+                                bm.compress(Bitmap.CompressFormat.JPEG,
+                                            85,
+                                            baos);
+
+                                boolean rotated = (mJpegRotation % 180) != 0;
+
+                                mActivity.getMediaSaveService().addImage(
+                                    baos.toByteArray(), title, finalDate, mLocation,
+                                    rotated ? height : width, rotated ? width : height,
+                                    orientation,  exif, mOnMediaSavedListener, mContentResolver);
+                            }
+                        }).start();
+
+                    } else {
+                        mActivity.getMediaSaveService().addImage(
                             jpegData, title, date, mLocation, width, height,
                             orientation, exif, mOnMediaSavedListener, mContentResolver);
+                    }
                 }
             } else {
                 mJpegImageData = jpegData;
@@ -885,6 +920,7 @@ public class PhotoModule
             Log.v(TAG, "mJpegCallbackFinishTime = "
                     + mJpegCallbackFinishTime + "ms");
             mJpegPictureCallbackTime = 0;
+
         }
     }
 
@@ -1074,6 +1110,17 @@ public class PhotoModule
                 CameraSettings.KEY_FLASH_MODE, flashMode,
                 CameraSettings.KEY_WHITE_BALANCE, whiteBalance,
                 CameraSettings.KEY_FOCUS_MODE, focusMode);
+        if (Util.needSamsungHDRFormat()){
+            if (mSceneMode == Util.SCENE_MODE_HDR) {
+                mUI.overrideSettings(CameraSettings.KEY_EXPOSURE,
+                        String.valueOf(mParameters.getMaxExposureCompensation()));
+                mParameters.setExposureCompensation(mParameters.getMaxExposureCompensation());
+            } else {
+                mUI.overrideSettings(CameraSettings.KEY_EXPOSURE, null);
+                mParameters.setExposureCompensation(CameraSettings.readExposure(mPreferences));
+            }
+            mCameraDevice.setParameters(mParameters);
+        }
     }
 
     private void loadCameraPreferences() {
@@ -1813,7 +1860,9 @@ public class PhotoModule
         int max = mParameters.getMaxExposureCompensation();
         int min = mParameters.getMinExposureCompensation();
         if (value >= min && value <= max) {
-            mParameters.setExposureCompensation(value);
+            if (mSceneMode != Util.SCENE_MODE_HDR || !Util.needSamsungHDRFormat()) {
+                mParameters.setExposureCompensation(value);
+            }
         } else {
             Log.w(TAG, "invalid exposure range: " + value);
         }
@@ -1876,6 +1925,9 @@ public class PhotoModule
     private void setCameraParameters(int updateSet) {
         if ((updateSet & UPDATE_PARAM_INITIALIZE) != 0) {
             updateCameraParametersInitialize();
+
+            // Set camera mode
+            CameraSettings.setVideoMode(mParameters, false);
         }
 
         if ((updateSet & UPDATE_PARAM_ZOOM) != 0) {
